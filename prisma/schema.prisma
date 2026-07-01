@@ -1,0 +1,473 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// Enums for enterprise-grade 3NF normalization
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  DOCTOR
+  RECEPTIONIST
+  PATIENT
+}
+
+enum DoctorRole {
+  CONSULTANT
+  SPECIALIST
+  ASSISTANT
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  COMPLETED
+  CANCELED
+}
+
+enum VisitType {
+  CONSULTATION
+  TREATMENT
+  FOLLOW_UP
+  EMERGENCY
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  INSTAPAY
+  INSURANCE
+}
+
+enum TreatmentStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  SUSPENDED
+}
+
+enum InvoiceStatus {
+  PAID
+  PARTIALLY_PAID
+  UNPAID
+  OVERDUE
+}
+
+enum InventoryStatus {
+  IN_STOCK
+  LOW_STOCK
+  OUT_OF_STOCK
+}
+
+enum NotificationPriority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum NotificationType {
+  APPOINTMENTS
+  PAYMENTS
+  INVENTORY
+  GENERAL
+}
+
+enum ToothCondition {
+  HEALTHY
+  CAVITY
+  FILLING
+  ROOT_CANAL
+  EXTRACTION
+  CROWN
+  BRIDGE
+  IMPLANT
+  ORTHODONTICS
+  MISSING
+}
+
+enum AuditLogAction {
+  LOGIN
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGOUT
+  LOGOUT_ALL_DEVICES
+  REFRESH_REUSE_DETECTED
+  CREATE_RECORD
+  UPDATE_RECORD
+  DELETE_RECORD
+}
+
+enum AuditLogStatus {
+  SUCCESS
+  FAILURE
+  REVOKED
+}
+
+/// 1. User Model (Centralized Auth & Access Control)
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  password      String
+  name          String
+  role          UserRole       @default(RECEPTIONIST)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+  doctor        Doctor?        // 1:1 relationship with Doctor
+  patient       Patient?       // 1:1 relationship with Patient
+
+  @@map("users")
+}
+
+/// 2. Doctor Model (No duplicate auth data)
+model Doctor {
+  id           String        @id @default(uuid())
+  userId       String        @unique
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialty    String
+  role         DoctorRole    @default(SPECIALIST)
+  image        String?       // Profile picture URL
+  appointments Appointment[] // One-to-many relationship with Appointments
+  revenueShareRules RevenueShareRule[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@map("doctors")
+}
+
+/// 3. Patient Model (Credentials moved to User)
+model Patient {
+  id                 String             @id @default(uuid())
+  userId             String?            @unique
+  user               User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name               String
+  phone              String
+  email              String?            @unique // Personal contact email (auth email is in User)
+  bloodType          String?            // e.g., "O+", "A-", etc.
+  emergencyName      String?
+  emergencyPhone     String?
+  emergencyRelation  String?
+  medicalConditions  String[]           @default([])
+  allergies          String[]           @default([])
+  insuranceProvider  String?
+  insurancePolicy    String?
+  insuranceDiscount  Decimal            @default(0.0) @db.Decimal(5, 2)
+  photoUrl           String?
+  isActive           Boolean            @default(true)
+  totalSpent         Decimal            @default(0.0) @db.Decimal(12, 2)
+  outstandingBalance Decimal            @default(0.0) @db.Decimal(12, 2)
+  lastVisit          DateTime?
+  appointments       Appointment[]
+  treatments         Treatment[]
+  invoices           Invoice[]
+  dentalCharts       DentalChart[]
+  refreshTokens      RefreshToken[]
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([phone])
+  @@map("patients")
+}
+
+/// 4. Appointment Model
+model Appointment {
+  id              String            @id @default(uuid())
+  patientId       String
+  patient         Patient           @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctorId        String
+  doctor          Doctor            @relation(fields: [doctorId], references: [id], onDelete: Restrict)
+  date            DateTime          @db.Date
+  time            String
+  duration        Int               @default(30)
+  visitType       VisitType         @default(CONSULTATION)
+  chairId         String            @default("Chair 1")
+  consultationFee Decimal           @default(0.0) @db.Decimal(10, 2)
+  paymentMethod   PaymentMethod     @default(CASH)
+  status          AppointmentStatus @default(SCHEDULED)
+  notes           String?
+  isOnline        Boolean           @default(false)
+  invoice         Invoice?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([date])
+  @@index([patientId])
+  @@index([doctorId])
+  @@map("appointments")
+}
+
+/// 5. Treatment Plan Model
+model Treatment {
+  id          String             @id @default(uuid())
+  patientId   String
+  patient     Patient            @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  status      TreatmentStatus    @default(IN_PROGRESS)
+  totalCost   Decimal            @db.Decimal(12, 2)
+  paidAmount  Decimal            @default(0.0) @db.Decimal(12, 2)
+  sessions    TreatmentSession[]
+  invoices    Invoice[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([patientId])
+  @@map("treatments")
+}
+
+/// 5b. Treatment Session Model
+model TreatmentSession {
+  id             String         @id @default(uuid())
+  treatmentId    String
+  treatment      Treatment      @relation(fields: [treatmentId], references: [id], onDelete: Cascade)
+  date           DateTime       @db.Date
+  notes          String?
+  completed      Boolean        @default(false)
+  affectedTeeth  Int[]          @default([])
+  toothCondition ToothCondition? // Standardized tooth condition enum
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@map("treatment_sessions")
+}
+
+/// 6. Invoice Model
+model Invoice {
+  id              String        @id @default(uuid())
+  patientId       String
+  patient         Patient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  appointmentId   String?       @unique
+  appointment     Appointment?  @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  treatmentPlanId String?
+  treatmentPlan   Treatment?    @relation(fields: [treatmentPlanId], references: [id], onDelete: SetNull)
+  date            DateTime      @default(now()) @db.Date
+  dueDate         DateTime      @db.Date
+  discount        Decimal       @default(0.0) @db.Decimal(10, 2)
+  tax             Decimal       @default(0.0) @db.Decimal(10, 2)
+  status          InvoiceStatus @default(UNPAID)
+  totalAmount     Decimal       @db.Decimal(12, 2)
+  paidAmount      Decimal       @default(0.0) @db.Decimal(12, 2)
+  items           InvoiceItem[]
+  payments        Payment[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([patientId])
+  @@map("invoices")
+}
+
+/// 6b. Invoice Item Model
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Int      @default(1)
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("invoice_items")
+}
+
+/// 7. Payment Model
+model Payment {
+  id        String        @id @default(uuid())
+  invoiceId String
+  invoice   Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  date      DateTime      @default(now())
+  amount    Decimal       @db.Decimal(12, 2)
+  method    PaymentMethod @default(CASH)
+  notes     String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+/// 7b. Profit Transaction Model
+model ProfitTransaction {
+  id           String   @id @default(uuid())
+  paymentId    String   @unique
+  invoiceId    String
+  date         DateTime @db.Date
+  amount       Decimal  @db.Decimal(12, 2)
+  type         String   // "Appointment" | "Treatment" | "Manual"
+  drAmrShare   Decimal  @db.Decimal(12, 2)
+  drBaselShare Decimal  @db.Decimal(12, 2)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("profit_transactions")
+}
+
+/// 8. Supplier Model (Enterprise normalized)
+model Supplier {
+  id          String      @id @default(uuid())
+  name        String      @unique
+  contactName String?
+  email       String?
+  phone       String?
+  address     String?
+  inventory   Inventory[]
+  expenses    Expense[]
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@map("suppliers")
+}
+
+/// 9. Inventory Model
+model Inventory {
+  id              String          @id @default(uuid())
+  name            String
+  category        String
+  sku             String?         @unique
+  quantity        Int             @default(0)
+  supplierId      String?
+  supplier        Supplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  unitPrice       Decimal         @db.Decimal(10, 2)
+  minQuantity     Int             @default(10)
+  expirationDate  DateTime?       @db.Date
+  storageLocation String?
+  status          InventoryStatus @default(IN_STOCK)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@map("inventory")
+}
+
+/// 10. Dental Chart Model
+model DentalChart {
+  id        String   @id @default(uuid())
+  patientId String   @unique // One dental chart per patient
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  isChild   Boolean  @default(false)
+  teethData Json?    // Optional raw JSON for custom visualization data
+  teeth     Tooth[]  // Fully normalized tooth relations
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([patientId])
+  @@map("dental_charts")
+}
+
+/// 10b. Tooth Model (Highly normalized representation of individual tooth states)
+model Tooth {
+  id            String         @id @default(uuid())
+  chartId       String
+  chart         DentalChart    @relation(fields: [chartId], references: [id], onDelete: Cascade)
+  toothNumber   Int
+  condition     ToothCondition @default(HEALTHY)
+  top           Boolean        @default(false)
+  bottom        Boolean        @default(false)
+  left          Boolean        @default(false)
+  right         Boolean        @default(false)
+  center        Boolean        @default(false)
+  notes         String?
+  treatmentDate DateTime?      @db.Date
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@unique([chartId, toothNumber])
+  @@map("teeth")
+}
+
+/// 11. Expense Model
+model Expense {
+  id          String    @id @default(uuid())
+  category    String
+  description String?
+  amount      Decimal   @db.Decimal(12, 2)
+  supplierId  String?
+  supplier    Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  date        DateTime  @db.Date
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("expenses")
+}
+
+/// 12. Notification Model
+model Notification {
+  id        String               @id @default(uuid())
+  type      NotificationType     @default(GENERAL)
+  priority  NotificationPriority @default(MEDIUM)
+  title     String
+  message   String
+  read      Boolean              @default(false)
+  patientId String?
+  actionUrl String?
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+/// 13. Refresh Token Model
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String?
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  patientId String?
+  patient   Patient?  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("refresh_tokens")
+}
+
+/// 14. Audit Log Model
+model AuditLog {
+  id        String         @id @default(uuid())
+  userId    String?
+  user      User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userEmail String?
+  action    AuditLogAction
+  status    AuditLogStatus
+  ipAddress String?
+  userAgent String?
+  details   String?
+  createdAt DateTime       @default(now())
+
+  @@map("audit_logs")
+}
+
+/// 15. Setting Model (System settings)
+model Setting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+/// 16. Revenue Share Rule Model (C-5 & C-6)
+model RevenueShareRule {
+  id              String   @id @default(uuid())
+  doctorId        String
+  doctor          Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  partnerSharePct Decimal  @db.Decimal(5,2)   // Percentage share of partner
+  selfSharePct    Decimal  @db.Decimal(5,2)   // Percentage share of doctor themselves
+  effectiveFrom   DateTime
+  effectiveTo     DateTime?
+
+  @@index([doctorId])
+  @@map("revenue_share_rules")
+}

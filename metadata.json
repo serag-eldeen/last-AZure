@@ -1,0 +1,6 @@
+{
+  "name": "Azure Dental Clinic",
+  "description": "An enterprise-grade Practice Management System (PMS) and clinic page featuring advanced patient booking, interactive dental charting, billing invoices, inventory tracking, and medical record management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
