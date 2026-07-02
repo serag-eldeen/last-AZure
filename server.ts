@@ -416,9 +416,16 @@ export interface AuthenticatedRequest extends express.Request {
   };
 }
 
-// Authentication Middleware relying solely on HttpOnly Cookies for maximum security
+// Authentication Middleware relying on HttpOnly Cookies or Authorization header fallback (crucial for iframe cross-origin contexts)
 function authenticateToken(req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) {
-  const token = req.cookies?.accessToken || req.cookies?.access_token;
+  let token = req.cookies?.accessToken || req.cookies?.access_token;
+
+  if (!token) {
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (authHeader && typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+      token = authHeader.substring(7);
+    }
+  }
 
   if (!token) {
     return res.status(401).json({ error: "Access token is required" });
@@ -1618,11 +1625,16 @@ app.get("/api/patients", authenticateToken, requireRole(["SUPER_ADMIN", "ADMIN",
 });
 
 app.post("/api/patients", authenticateToken, requireRole(["SUPER_ADMIN", "ADMIN", "DOCTOR", "RECEPTIONIST"]), async (req: AuthenticatedRequest, res) => {
+  try {
+    fs.writeFileSync("patients_payload.json", JSON.stringify(req.body, null, 2));
+  } catch (err) {
+    console.error("Failed to write patients_payload.json", err);
+  }
   const validation = z.array(PatientSchema).safeParse(req.body);
   if (!validation.success) {
-    const errText = `Validation failed: ${JSON.stringify(validation.error.issues, null, 2)}`;
+    const errText = `Validation failed: ${JSON.stringify(validation.error.issues, null, 2)}\nPayload: ${JSON.stringify(req.body, null, 2)}`;
     console.error(errText);
-    require("fs").writeFileSync("patients_error.log", errText);
+    fs.writeFileSync("patients_error.log", errText);
     return res.status(400).json({ error: "Invalid request payload", details: validation.error.issues });
   }
   const patients = validation.data;
@@ -1769,7 +1781,7 @@ app.post("/api/patients", authenticateToken, requireRole(["SUPER_ADMIN", "ADMIN"
   } catch (err: any) {
     const errText = `Post patients failed: ${err.message}\nStack: ${err.stack}`;
     console.error(errText);
-    require("fs").writeFileSync("patients_error.log", errText);
+    fs.writeFileSync("patients_error.log", errText);
     return res.status(500).json({ error: "Failed to update patients" });
   }
 });
@@ -3292,14 +3304,14 @@ app.post("/api/auth/login", rateLimiter(10, 60 * 1000), async (req, res) => {
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: true,
-      sameSite: "lax",
+      sameSite: "none",
       maxAge: 15 * 60 * 1000
     });
 
     res.cookie("refreshToken", refreshTokenRaw, {
       httpOnly: true,
       secure: true,
-      sameSite: "lax",
+      sameSite: "none",
       maxAge: 7 * 24 * 60 * 60 * 1000
     });
 
@@ -3418,8 +3430,8 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
         }
 
         // Clear security cookies
-        res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "lax" });
-        res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "lax" });
+        res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "none" });
+        res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
 
         await createAuditLog(
           "REFRESH_REUSE_DETECTED",
@@ -3480,14 +3492,14 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
         res.cookie("accessToken", newAccessToken, {
           httpOnly: true,
           secure: true,
-          sameSite: "lax",
+          sameSite: "none",
           maxAge: 15 * 60 * 1000
         });
 
         res.cookie("refreshToken", newRefreshTokenRaw, {
           httpOnly: true,
           secure: true,
-          sameSite: "lax",
+          sameSite: "none",
           maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
@@ -3515,14 +3527,14 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
         res.cookie("accessToken", newAccessToken, {
           httpOnly: true,
           secure: true,
-          sameSite: "lax",
+          sameSite: "none",
           maxAge: 15 * 60 * 1000
         });
 
         res.cookie("refreshToken", newRefreshTokenRaw, {
           httpOnly: true,
           secure: true,
-          sameSite: "lax",
+          sameSite: "none",
           maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
@@ -3567,8 +3579,8 @@ app.post("/api/auth/logout", async (req, res) => {
   }
 
   // Clear HTTP-only cookies
-  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "lax" });
-  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "lax" });
+  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "none" });
+  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
 
   return res.json({ success: true, message: "Logged out from current device successfully" });
 });
@@ -3605,8 +3617,8 @@ app.post("/api/auth/logout-all", authenticateToken, async (req, res) => {
   }
 
   // Clear HTTP-only cookies
-  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "lax" });
-  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "lax" });
+  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "none" });
+  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
 
   return res.json({ success: true, message: "Logged out from all devices successfully" });
 });

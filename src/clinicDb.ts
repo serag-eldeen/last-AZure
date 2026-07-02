@@ -1,3 +1,4 @@
+import { apiFetch as fetch } from './lib/api';
 import { 
   AdminDoctor, ExtendedPatient, AdminAppointment, DentalChart, ToothState, 
   TreatmentPlan, Invoice, Expense, InventoryItem, ClinicNotification, MonthlyProfitReport,
@@ -402,12 +403,15 @@ let dbCache: Record<string, any> = {};
 let isDbLoadedState = false;
 let isLoadedFromBackend = false;
 
-// Token auto-refresh helper relying solely on secure HTTP-Only Cookies
+// Token auto-refresh helper relying on secure HTTP-Only Cookies or manual fallback
 async function attemptTokenRefresh(): Promise<boolean> {
   try {
+    const storedRefresh = sessionStorage.getItem('azure_refresh_token') || localStorage.getItem('azure_refresh_token');
     const res = await fetch("/api/auth/refresh", {
       method: "POST",
-      credentials: "include"
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ refreshToken: storedRefresh })
     });
     return res.ok;
   } catch (e) {
@@ -439,7 +443,7 @@ async function syncWithBackend(key: string, data: any) {
       body: JSON.stringify(data)
     });
 
-    if (res.status === 401) {
+    if (res.status === 401 || res.status === 403) {
       // Access token expired, attempt automatic background refresh
       const refreshed = await attemptTokenRefresh();
       if (refreshed) {
@@ -454,6 +458,18 @@ async function syncWithBackend(key: string, data: any) {
 
     if (!res.ok) {
       console.error(`Backend save returned non-OK code for key ${key} at ${endpoint}:`, res.status);
+      if (res.status === 401 || res.status === 403) {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.removeItem('azure_admin_authenticated');
+          window.sessionStorage.removeItem('azure_user_role');
+          window.sessionStorage.removeItem('azure_user_name');
+          window.sessionStorage.removeItem('azure_user_email');
+          window.sessionStorage.removeItem('azure_access_token');
+          window.localStorage.removeItem('azure_access_token');
+          window.sessionStorage.removeItem('azure_refresh_token');
+          window.localStorage.removeItem('azure_refresh_token');
+        }
+      }
     }
   } catch (err) {
     console.error(`Failed to sync key ${key} with full-stack backend:`, err);
@@ -555,7 +571,13 @@ export async function initClinicDb(force: boolean = false): Promise<void> {
   let authenticated = false;
   let userRole = "";
   try {
-    const meRes = await fetch("/api/auth/me", { credentials: "include" });
+    let meRes = await fetch("/api/auth/me", { credentials: "include" });
+    if (meRes.status === 401 || meRes.status === 403) {
+      const refreshed = await attemptTokenRefresh();
+      if (refreshed) {
+        meRes = await fetch("/api/auth/me", { credentials: "include" });
+      }
+    }
     if (meRes.ok) {
       const meData = await meRes.json();
       authenticated = true;

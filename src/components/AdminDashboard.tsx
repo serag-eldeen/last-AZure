@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch as fetch } from '../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Lock, Unlock, ShieldAlert, X, RefreshCw, User, 

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { apiFetch as fetch } from '../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   X, ChevronRight, ChevronLeft, Calendar, Clock, User, 
