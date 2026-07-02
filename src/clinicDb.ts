@@ -402,34 +402,14 @@ let dbCache: Record<string, any> = {};
 let isDbLoadedState = false;
 let isLoadedFromBackend = false;
 
-// Token auto-refresh helper
+// Token auto-refresh helper relying solely on secure HTTP-Only Cookies
 async function attemptTokenRefresh(): Promise<boolean> {
   try {
-    const body: Record<string, string> = {};
-    if (typeof window !== "undefined") {
-      const rToken = window.sessionStorage.getItem("azure_refresh_token") || window.localStorage.getItem("azure_refresh_token");
-      if (rToken) {
-        body["refreshToken"] = rToken;
-      }
-    }
     const res = await fetch("/api/auth/refresh", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(body)
+      credentials: "include"
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (typeof window !== "undefined" && data.token) {
-        window.sessionStorage.setItem("azure_access_token", data.token);
-        window.localStorage.setItem("azure_access_token", data.token);
-      }
-      if (typeof window !== "undefined" && data.refreshToken) {
-        window.sessionStorage.setItem("azure_refresh_token", data.refreshToken);
-        window.localStorage.setItem("azure_refresh_token", data.refreshToken);
-      }
-      return true;
-    }
+    return res.ok;
   } catch (e) {
     console.error("Failed to automatically refresh access token:", e);
   }
@@ -452,13 +432,6 @@ async function syncWithBackend(key: string, data: any) {
   try {
     const endpoint = `/api/${key.replace("_", "-")}`;
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (typeof window !== "undefined") {
-      const token = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-    }
-
     let res = await fetch(endpoint, {
       method: "POST",
       headers,
@@ -470,16 +443,9 @@ async function syncWithBackend(key: string, data: any) {
       // Access token expired, attempt automatic background refresh
       const refreshed = await attemptTokenRefresh();
       if (refreshed) {
-        const freshHeaders: Record<string, string> = { "Content-Type": "application/json" };
-        if (typeof window !== "undefined") {
-          const freshToken = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-          if (freshToken) {
-            freshHeaders["Authorization"] = `Bearer ${freshToken}`;
-          }
-        }
         res = await fetch(endpoint, {
           method: "POST",
-          headers: freshHeaders,
+          headers,
           credentials: "include",
           body: JSON.stringify(data)
         });
@@ -589,14 +555,7 @@ export async function initClinicDb(force: boolean = false): Promise<void> {
   let authenticated = false;
   let userRole = "";
   try {
-    const headers: Record<string, string> = {};
-    if (typeof window !== "undefined") {
-      const token = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-    }
-    const meRes = await fetch("/api/auth/me", { headers, credentials: "include" });
+    const meRes = await fetch("/api/auth/me", { credentials: "include" });
     if (meRes.ok) {
       const meData = await meRes.json();
       authenticated = true;
@@ -609,25 +568,11 @@ export async function initClinicDb(force: boolean = false): Promise<void> {
   if (authenticated) {
     const fetchSafe = async (url: string, fallback: any = []) => {
       try {
-        const headers: Record<string, string> = {};
-        if (typeof window !== "undefined") {
-          const token = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-          if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-          }
-        }
-        let res = await fetch(url, { headers, credentials: "include" });
+        let res = await fetch(url, { credentials: "include" });
         if (res.status === 401) {
           const refreshed = await attemptTokenRefresh();
           if (refreshed) {
-            const freshHeaders: Record<string, string> = {};
-            if (typeof window !== "undefined") {
-              const freshToken = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-              if (freshToken) {
-                freshHeaders["Authorization"] = `Bearer ${freshToken}`;
-              }
-            }
-            res = await fetch(url, { headers: freshHeaders, credentials: "include" });
+            res = await fetch(url, { credentials: "include" });
           }
         }
         if (res.ok) {
@@ -1351,12 +1296,6 @@ export async function deleteWithBackend(key: string, id: string) {
   try {
     const endpoint = `/api/${key.replace("_", "-")}/${id}`;
     const headers: Record<string, string> = {};
-    if (typeof window !== "undefined") {
-      const token = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-    }
 
     let res = await fetch(endpoint, {
       method: "DELETE",
@@ -1367,16 +1306,9 @@ export async function deleteWithBackend(key: string, id: string) {
     if (res.status === 401) {
       const refreshed = await attemptTokenRefresh();
       if (refreshed) {
-        const freshHeaders: Record<string, string> = {};
-        if (typeof window !== "undefined") {
-          const freshToken = window.sessionStorage.getItem("azure_access_token") || window.localStorage.getItem("azure_access_token");
-          if (freshToken) {
-            freshHeaders["Authorization"] = `Bearer ${freshToken}`;
-          }
-        }
         res = await fetch(endpoint, {
           method: "DELETE",
-          headers: freshHeaders,
+          headers,
           credentials: "include"
         });
       }

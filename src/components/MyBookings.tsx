@@ -252,15 +252,6 @@ export default function MyBookings({ isOpen, onClose, triggerRefresh, onOpenBook
         if (res.ok) {
           const data = await res.json();
           
-          if (data.token) {
-            sessionStorage.setItem('azure_access_token', data.token);
-            localStorage.setItem('azure_access_token', data.token);
-          }
-          if (data.refreshToken) {
-            sessionStorage.setItem('azure_refresh_token', data.refreshToken);
-            localStorage.setItem('azure_refresh_token', data.refreshToken);
-          }
-          
           await initClinicDb(true);
           
           if (data.user && data.user.role && data.user.role !== "PATIENT") {
@@ -479,6 +470,10 @@ export default function MyBookings({ isOpen, onClose, triggerRefresh, onOpenBook
     sessionStorage.removeItem('azure_user_role');
     sessionStorage.removeItem('azure_user_name');
     sessionStorage.removeItem('azure_user_email');
+    sessionStorage.removeItem('azure_access_token');
+    localStorage.removeItem('azure_access_token');
+    sessionStorage.removeItem('azure_refresh_token');
+    localStorage.removeItem('azure_refresh_token');
     setActivePatient(null);
     setMyAppointments([]);
   };

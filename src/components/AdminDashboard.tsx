@@ -60,12 +60,7 @@ export default function AdminDashboard({ isOpen, onClose, triggerRefresh, onData
   useEffect(() => {
     const verifyAuth = async () => {
       try {
-        const token = sessionStorage.getItem("azure_access_token") || localStorage.getItem("azure_access_token");
-        const headers: Record<string, string> = {};
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`;
-        }
-        const res = await fetch("/api/auth/me", { headers, credentials: "include" });
+        const res = await fetch("/api/auth/me", { credentials: "include" });
         if (res.ok) {
           const data = await res.json();
           if (data.user && data.user.role && data.user.role !== "PATIENT") {
@@ -117,14 +112,6 @@ export default function AdminDashboard({ isOpen, onClose, triggerRefresh, onData
           sessionStorage.setItem('azure_user_role', data.user.role);
           sessionStorage.setItem('azure_user_name', data.user.name);
           sessionStorage.setItem('azure_user_email', data.user.email);
-          if (data.token) {
-            sessionStorage.setItem('azure_access_token', data.token);
-            localStorage.setItem('azure_access_token', data.token);
-          }
-          if (data.refreshToken) {
-            sessionStorage.setItem('azure_refresh_token', data.refreshToken);
-            localStorage.setItem('azure_refresh_token', data.refreshToken);
-          }
           setIsAuthenticated(true);
           setAuthError('');
           setPasscode('');
@@ -159,6 +146,10 @@ export default function AdminDashboard({ isOpen, onClose, triggerRefresh, onData
     sessionStorage.removeItem('azure_user_role');
     sessionStorage.removeItem('azure_user_name');
     sessionStorage.removeItem('azure_user_email');
+    sessionStorage.removeItem('azure_access_token');
+    localStorage.removeItem('azure_access_token');
+    sessionStorage.removeItem('azure_refresh_token');
+    localStorage.removeItem('azure_refresh_token');
   };
 
   const handleLocalRefresh = () => {

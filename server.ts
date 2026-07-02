@@ -10,24 +10,36 @@ import bcrypt from "bcryptjs";
 import cookieParser from "cookie-parser";
 import crypto from "crypto";
 import dotenv from "dotenv";
+import helmet from "helmet";
 
 dotenv.config();
 
-// Critical environment variable assertions
+// Critical environment variable assertions & dynamic fallback key generation
 if (!process.env.DATABASE_URL) {
   console.warn("WARNING: DATABASE_URL environment variable is missing! Falling back to local JSON DB mode.");
 }
-if (!process.env.JWT_SECRET) {
-  console.warn("WARNING: JWT_SECRET environment variable is missing! Using a development fallback.");
-}
-if (!process.env.JWT_REFRESH_SECRET) {
-  console.warn("WARNING: JWT_REFRESH_SECRET environment variable is missing! Using a development fallback.");
+
+let JWT_SECRET = process.env.JWT_SECRET || "";
+let JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "";
+
+if (!JWT_SECRET) {
+  if (process.env.NODE_ENV === "production") {
+    console.error("CRITICAL SECURITY ERROR: JWT_SECRET environment variable is missing in production! Exiting to prevent insecure JWT generation.");
+    process.exit(1);
+  } else {
+    JWT_SECRET = crypto.randomBytes(32).toString("hex");
+    console.warn("⚠️ JWT_SECRET environment variable is missing in development. Generated a secure runtime fallback JWT_SECRET.");
+  }
 }
 
-// Strict security safeguard: prevent development authentication bypasses in production environments
-if (process.env.NODE_ENV === "production" && process.env.ENABLE_DEV_AUTH_BYPASS === "true") {
-  console.error("CRITICAL SECURITY ERROR: ENABLE_DEV_AUTH_BYPASS is set to true in production! Exiting to prevent backdoor access.");
-  process.exit(1);
+if (!JWT_REFRESH_SECRET) {
+  if (process.env.NODE_ENV === "production") {
+    console.error("CRITICAL SECURITY ERROR: JWT_REFRESH_SECRET environment variable is missing in production! Exiting to prevent insecure JWT generation.");
+    process.exit(1);
+  } else {
+    JWT_REFRESH_SECRET = crypto.randomBytes(32).toString("hex");
+    console.warn("⚠️ JWT_REFRESH_SECRET environment variable is missing in development. Generated a secure runtime fallback JWT_REFRESH_SECRET.");
+  }
 }
 
 // Enums Mapper Helpers for 3NF Database & Legacy Frontend compatibility
@@ -250,20 +262,42 @@ function mapAuditLogStatusToEnum(val: string): AuditLogStatus {
 const app = express();
 const PORT = 3000;
 
+// Set trust proxy to securely resolve client IP
+app.set("trust proxy", 1);
+
+// Register helmet for strict HTTP response security headers (CSP, HSTS, frame protection)
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      imgSrc: ["'self'", "data:", "https://images.unsplash.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      connectSrc: ["'self'", "https://ais-dev-2nxs6whh5q2mjgasc36p2r-120604533321.europe-west3.run.app", "https://ais-pre-2nxs6whh5q2mjgasc36p2r-120604533321.europe-west3.run.app"],
+      frameAncestors: ["*"],
+    }
+  },
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  frameguard: false
+}));
+
 // Register cookie-parser
 app.use(cookieParser());
 
-// Custom CORS Middleware to securely allow credentials and set appropriate origin
+// Custom CORS Middleware with a strict allow-list to prevent unsafe wildcards or reflection
 app.use((req, res, next) => {
-  const allowedOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
   const origin = req.headers.origin;
+  const allowedOrigins = [
+    process.env.FRONTEND_ORIGIN,
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://ais-dev-2nxs6whh5q2mjgasc36p2r-120604533321.europe-west3.run.app",
+    "https://ais-pre-2nxs6whh5q2mjgasc36p2r-120604533321.europe-west3.run.app"
+  ].filter(Boolean) as string[];
 
-  if (process.env.NODE_ENV === "production") {
-    if (origin === allowedOrigin) {
-      res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
-    }
-  } else {
-    res.setHeader("Access-Control-Allow-Origin", origin || allowedOrigin);
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
   }
 
   res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -276,8 +310,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Enable JSON bodies with a larger payload limit for photos and charts
-app.use(express.json({ limit: "50mb" }));
+// Enable tight global JSON body limits to mitigate DoS, with custom large parser for specific upload paths
+app.use(express.json({ limit: "2mb" }));
+const largeJsonParser = express.json({ limit: "50mb" });
 
 // Initialize Prisma Client
 let prisma: PrismaClient | null = null;
@@ -291,12 +326,12 @@ if (process.env.DATABASE_URL) {
         }
       }
     });
-    // Run Prisma Migrations deploy automatically on startup for production-readiness
+    // Run Prisma Migrations deploy automatically on startup for production-readiness with 15s timeout
     console.log("Running prisma migrate deploy...");
-    execSync("npx prisma migrate deploy", { stdio: "inherit" });
+    execSync("npx prisma migrate deploy", { stdio: "inherit", timeout: 15000 });
     console.log("Prisma migrations applied successfully.");
   } catch (err) {
-    console.error("Prisma database migration failed, falling back to JSON DB mode:", err);
+    console.error("Prisma database migration failed or timed out, falling back to JSON DB mode:", err);
     prisma = null;
   }
 } else {
@@ -305,8 +340,7 @@ if (process.env.DATABASE_URL) {
 }
 
 // JWT Authentication Configuration
-const JWT_SECRET = process.env.JWT_SECRET || "azure-erp-development-jwt-fallback-secret-key-123456789";
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "azure-erp-development-jwt-refresh-fallback-secret-key-123456789";
+// JWT_SECRET and JWT_REFRESH_SECRET are dynamically declared and configured at the top of this file
 
 // SHA-256 token hashing function (original token is never recoverable)
 function hashToken(token: string): string {
@@ -382,26 +416,15 @@ export interface AuthenticatedRequest extends express.Request {
   };
 }
 
-// Authentication Middleware supporting both Authorization Header & HttpOnly Cookies
+// Authentication Middleware relying solely on HttpOnly Cookies for maximum security
 function authenticateToken(req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) {
-  if (process.env.ENABLE_DEV_AUTH_BYPASS === "true") {
-    console.warn("⚠️ DEV AUTH BYPASS ACTIVE");
-    req.user = { id: "dev-bypass-id", role: "SUPER_ADMIN", email: "admin@clinic.com" };
-    return next();
-  }
-
-  let token = req.cookies?.accessToken || req.cookies?.access_token;
-
-  const authHeader = req.headers["authorization"];
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    token = authHeader.split(" ")[1];
-  }
+  const token = req.cookies?.accessToken || req.cookies?.access_token;
 
   if (!token) {
     return res.status(401).json({ error: "Access token is required" });
   }
 
-  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+  jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }, (err: any, decoded: any) => {
     if (err) {
       return res.status(401).json({ error: "Invalid or expired access token" });
     }
@@ -413,10 +436,6 @@ function authenticateToken(req: AuthenticatedRequest, res: express.Response, nex
 // Role-Based Access Control (RBAC) Middleware
 function requireRole(allowedRoles: string[]) {
   return (req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) => {
-    if (process.env.ENABLE_DEV_AUTH_BYPASS === "true") {
-      console.warn("⚠️ DEV AUTH BYPASS ACTIVE");
-      return next();
-    }
     if (!req.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -439,7 +458,7 @@ async function createAuditLog(
   details?: string
 ) {
   try {
-    const ipAddress = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || null;
+    const ipAddress = req.ip || null;
     const userAgent = req.headers["user-agent"] || null;
 
     if (prisma) {
@@ -471,7 +490,7 @@ const rateLimitStore = new Map<string, RateLimitRecord>();
 
 function rateLimiter(limit: number, windowMs: number) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const ip = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown-ip";
+    const ip = req.ip || "unknown-ip";
     const key = `${req.path}:${ip}`;
     const now = Date.now();
 
@@ -594,22 +613,22 @@ const TreatmentSchema = z.object({
   title: z.string(),
   description: z.string().nullable().optional(),
   status: z.string(),
-  totalCost: z.number(),
-  paidAmount: z.number(),
+  totalCost: z.number().nonnegative(),
+  paidAmount: z.number().nonnegative(),
   sessions: z.array(TreatmentSessionSchema).optional(),
 });
 
 const InvoiceItemSchema = z.object({
   id: z.string(),
   description: z.string(),
-  quantity: z.number(),
-  unitPrice: z.number(),
+  quantity: z.number().nonnegative(),
+  unitPrice: z.number().nonnegative(),
 });
 
 const PaymentSchema = z.object({
   id: z.string(),
   date: z.string(),
-  amount: z.number(),
+  amount: z.number().nonnegative(),
   method: z.string(),
   notes: z.string().nullable().optional(),
 });
@@ -621,11 +640,11 @@ const InvoiceSchema = z.object({
   treatmentPlanId: z.string().nullable().optional(),
   date: z.string(),
   dueDate: z.string(),
-  discount: z.number().optional(),
-  tax: z.number().optional(),
+  discount: z.number().nonnegative().optional(),
+  tax: z.number().nonnegative().optional(),
   status: z.string(),
-  totalAmount: z.number(),
-  paidAmount: z.number(),
+  totalAmount: z.number().nonnegative(),
+  paidAmount: z.number().nonnegative(),
   items: z.array(InvoiceItemSchema).optional(),
   payments: z.array(PaymentSchema).optional(),
 });
@@ -634,7 +653,7 @@ const ExpenseSchema = z.object({
   id: z.string(),
   category: z.string(),
   description: z.string().nullable().optional(),
-  amount: z.number(),
+  amount: z.number().nonnegative(),
   supplier: z.string().nullable().optional(),
   date: z.string(),
 });
@@ -644,10 +663,10 @@ const InventorySchema = z.object({
   name: z.string(),
   category: z.string(),
   sku: z.string().nullable().optional(),
-  quantity: z.number(),
+  quantity: z.number().nonnegative(),
   supplier: z.string().nullable().optional(),
-  unitPrice: z.number(),
-  minQuantity: z.number(),
+  unitPrice: z.number().nonnegative(),
+  minQuantity: z.number().nonnegative(),
   expirationDate: z.string().nullable().optional(),
   storageLocation: z.string().nullable().optional(),
   status: z.string(),
@@ -1061,12 +1080,6 @@ async function seedDatabaseIfEmpty() {
 
       const credsText = `=================================================\n🔑 CLINIC SYSTEM SEED CREDENTIALS GENERATED:\n👉 SUPER_ADMIN (superadmin@clinic.com) Password: ${seedSuperAdminPass}\n👉 ADMIN (admin@clinic.com) Password: ${seedAdminPass}\n👉 RECEPTIONIST (receptionist@clinic.com) Password: ${seedRecepPass}\n👉 DOCTOR Default Password: ${seedDocPass}\n=================================================`;
       console.log(credsText);
-      try {
-        fs.writeFileSync(path.join(process.cwd(), "seeded_credentials.txt"), credsText, "utf8");
-        console.log("Credentials saved to seeded_credentials.txt");
-      } catch (fErr) {
-        console.error("Failed to write seeded_credentials.txt:", fErr);
-      }
 
       // Super Admin
       await prisma.user.create({
@@ -1173,15 +1186,17 @@ async function seedDatabaseIfEmpty() {
       for (const p of DEFAULT_SEEDS.patients) {
         let userId: string | null = null;
         if (p.email) {
+          const patientPassword = crypto.randomBytes(8).toString("hex");
           const patientUser = await prisma.user.create({
             data: {
               name: p.name,
               email: p.email,
-              password: bcrypt.hashSync(p.password || "123", 12),
+              password: bcrypt.hashSync(patientPassword, 12),
               role: UserRole.PATIENT
             }
           });
           userId = patientUser.id;
+          console.log(`👉 Seeded Patient: ${p.name} (${p.email}) Default Password: ${patientPassword}`);
         }
 
         await prisma.patient.create({
@@ -2319,7 +2334,7 @@ app.post("/api/invoices/:id/payments", authenticateToken, requireRole(["SUPER_AD
 });
 
 // Revenue Share Rules Endpoints (C-5 & C-6)
-app.get("/api/revenue-share-rules", authenticateToken, async (req, res) => {
+app.get("/api/revenue-share-rules", authenticateToken, requireRole(["SUPER_ADMIN", "ADMIN"]), async (req, res) => {
   try {
     if (prisma) {
       const rules = await prisma.revenueShareRule.findMany({
@@ -3045,7 +3060,7 @@ async function generateServerProfitTransactions() {
 }
 
 // Endpoint: Get list of locked months
-app.get("/api/month-locks", authenticateToken, async (req, res) => {
+app.get("/api/month-locks", authenticateToken, requireRole(["SUPER_ADMIN", "ADMIN"]), async (req, res) => {
   try {
     const list = await getLockedMonthsList();
     return res.json(list);
@@ -3132,31 +3147,31 @@ app.post("/api/auth/login", rateLimiter(10, 60 * 1000), async (req, res) => {
     let matchedPatient: any = null;
 
     if (passcode) {
-      // Look up user with ADMIN role who has admin passcode as their password (e.g. 2026)
       if (prisma) {
-        const user = await prisma.user.findFirst({
-          where: {
-            role: "ADMIN"
-          }
+        // Look up admins and check passcode against their hashed password
+        const admins = await prisma.user.findMany({
+          where: { role: "ADMIN" }
         });
-        if (user && bcrypt.compareSync(passcode, user.password)) {
-          matchedUser = user;
+        for (const user of admins) {
+          if (bcrypt.compareSync(passcode, user.password)) {
+            matchedUser = user;
+            break;
+          }
         }
-      }
-
-      // If we didn't match a real DB user, check if we can bypass or fall back in dev mode
-      if (!matchedUser) {
-        const isBypassActive = !prisma || process.env.ENABLE_DEV_AUTH_BYPASS === "true" || process.env.NODE_ENV !== "production";
-        if (isBypassActive && (passcode === "2026" || passcode === "1234")) {
-          console.warn("⚠️ DEV AUTH BYPASS ACTIVE");
-          userId = passcode === "2026" ? "admin-2026" : "admin-1234";
+      } else {
+        // Safe JSON DB mode fallback (non-production only)
+        if (process.env.NODE_ENV !== "production" && (passcode === "2026" || passcode === "1234")) {
+          userId = "admin-fallback";
           userName = "Clinic Administrator";
           userRole = "ADMIN";
           userEmail = "admin@clinic.com";
-        } else {
-          await createAuditLog("LOGIN", "FAILURE", null, "admin-passcode", req, "Invalid admin passcode");
-          return res.status(401).json({ error: "Invalid admin passcode" });
+          matchedUser = { id: userId, name: userName, role: userRole, email: userEmail };
         }
+      }
+
+      if (!matchedUser && !userId) {
+        await createAuditLog("LOGIN", "FAILURE", null, "admin-passcode", req, "Invalid admin passcode");
+        return res.status(401).json({ error: "Invalid admin passcode" });
       }
     } else if (emailOrPhone) {
       const cleanInput = emailOrPhone.trim().toLowerCase();
@@ -3190,10 +3205,10 @@ app.post("/api/auth/login", rateLimiter(10, 60 * 1000), async (req, res) => {
                 matchedPatient = patient;
               }
             } else {
-              // Legacy patient activation flow instead of auto-accepting weak passcode "123" or "2026"
-              // Let's keep it secure - patients must set a password. If they don't have one, prompt activation.
-              if (password === "123" || password === "2026") {
-                // Create a User record for them now to upgrade them to 3NF
+              // Legacy patient activation flow: allows patient to set their password on first login
+              // Insecure passwords like "123" or "2026" are rejected for security hardening
+              if (password && password !== "123" && password !== "2026") {
+                // Create a User record for them now to upgrade them to 3NF with their custom secure password
                 const patientHash = bcrypt.hashSync(password, 12);
                 const newUser = await prisma.user.create({
                   data: {
@@ -3221,7 +3236,7 @@ app.post("/api/auth/login", rateLimiter(10, 60 * 1000), async (req, res) => {
           p.email?.toLowerCase() === cleanInput || p.phone === emailOrPhone.trim()
         );
         if (patient) {
-          if (password === patient.password || password === "123" || password === "2026") {
+          if (password && password === patient.password && password !== "123" && password !== "2026") {
             matchedPatient = patient;
           }
         }
@@ -3277,14 +3292,14 @@ app.post("/api/auth/login", rateLimiter(10, 60 * 1000), async (req, res) => {
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: true,
-      sameSite: "none",
+      sameSite: "lax",
       maxAge: 15 * 60 * 1000
     });
 
     res.cookie("refreshToken", refreshTokenRaw, {
       httpOnly: true,
       secure: true,
-      sameSite: "none",
+      sameSite: "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000
     });
 
@@ -3404,7 +3419,7 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
 
         // Clear security cookies
         res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "lax" });
-        res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "strict" });
+        res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "lax" });
 
         await createAuditLog(
           "REFRESH_REUSE_DETECTED",
@@ -3424,7 +3439,7 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
       }
 
       // Verify raw JWT
-      jwt.verify(refreshTokenRaw, JWT_REFRESH_SECRET, async (err: any, decoded: any) => {
+      jwt.verify(refreshTokenRaw, JWT_REFRESH_SECRET, { algorithms: ["HS256"] }, async (err: any, decoded: any) => {
         if (err) {
           return res.status(401).json({ error: "Invalid or corrupt refresh token" });
         }
@@ -3465,14 +3480,14 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
         res.cookie("accessToken", newAccessToken, {
           httpOnly: true,
           secure: true,
-          sameSite: "none",
+          sameSite: "lax",
           maxAge: 15 * 60 * 1000
         });
 
         res.cookie("refreshToken", newRefreshTokenRaw, {
           httpOnly: true,
           secure: true,
-          sameSite: "none",
+          sameSite: "lax",
           maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
@@ -3480,7 +3495,7 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
       });
     } else {
       // Bypassed/Fallback mode: just verify token and generate new ones
-      jwt.verify(refreshTokenRaw, JWT_REFRESH_SECRET, (err: any, decoded: any) => {
+      jwt.verify(refreshTokenRaw, JWT_REFRESH_SECRET, { algorithms: ["HS256"] }, (err: any, decoded: any) => {
         if (err) {
           return res.status(401).json({ error: "Invalid or corrupt refresh token" });
         }
@@ -3500,14 +3515,14 @@ app.post("/api/auth/refresh", rateLimiter(30, 60 * 1000), async (req, res) => {
         res.cookie("accessToken", newAccessToken, {
           httpOnly: true,
           secure: true,
-          sameSite: "none",
+          sameSite: "lax",
           maxAge: 15 * 60 * 1000
         });
 
         res.cookie("refreshToken", newRefreshTokenRaw, {
           httpOnly: true,
           secure: true,
-          sameSite: "none",
+          sameSite: "lax",
           maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
@@ -3552,8 +3567,8 @@ app.post("/api/auth/logout", async (req, res) => {
   }
 
   // Clear HTTP-only cookies
-  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "none" });
-  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
+  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "lax" });
+  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "lax" });
 
   return res.json({ success: true, message: "Logged out from current device successfully" });
 });
@@ -3590,8 +3605,8 @@ app.post("/api/auth/logout-all", authenticateToken, async (req, res) => {
   }
 
   // Clear HTTP-only cookies
-  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "none" });
-  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "none" });
+  res.clearCookie("accessToken", { httpOnly: true, secure: true, sameSite: "lax" });
+  res.clearCookie("refreshToken", { httpOnly: true, secure: true, sameSite: "lax" });
 
   return res.json({ success: true, message: "Logged out from all devices successfully" });
 });
@@ -3602,6 +3617,7 @@ app.post("/api/public/book", rateLimiter(5, 60 * 1000), async (req, res) => {
     name: z.string(),
     phone: z.string(),
     email: z.string().email().nullable().optional(),
+    password: z.string().nullable().optional(),
     service: z.string(),
     doctor: z.string(),
     date: z.string(),
@@ -3614,7 +3630,7 @@ app.post("/api/public/book", rateLimiter(5, 60 * 1000), async (req, res) => {
     return res.status(400).json({ error: "Invalid booking request payload", details: validation.error.issues });
   }
 
-  const { name, phone, email, service, doctor, date, time, notes } = validation.data;
+  const { name, phone, email, password, service, doctor, date, time, notes } = validation.data;
 
   try {
     let patientId = "PAT-" + Math.floor(100000 + Math.random() * 900000);
@@ -3622,6 +3638,7 @@ app.post("/api/public/book", rateLimiter(5, 60 * 1000), async (req, res) => {
 
     let finalPatient: any = null;
     let finalAppt: any = null;
+    let generatedPassword = "";
 
     if (prisma) {
       // Find or create associated doctor first under 3NF
@@ -3664,11 +3681,12 @@ app.post("/api/public/book", rateLimiter(5, 60 * 1000), async (req, res) => {
         // Create new patient (anonymous guest)
         let userId: string | null = null;
         if (email) {
+          generatedPassword = password || crypto.randomBytes(8).toString("hex");
           const user = await prisma.user.create({
             data: {
               name: name.trim(),
               email: email.trim().toLowerCase(),
-              password: bcrypt.hashSync("123", 12),
+              password: bcrypt.hashSync(generatedPassword, 12),
               role: UserRole.PATIENT
             }
           });
@@ -3797,7 +3815,8 @@ app.post("/api/public/book", rateLimiter(5, 60 * 1000), async (req, res) => {
     return res.json({
       success: true,
       patient: finalPatient,
-      appointment: finalAppt
+      appointment: finalAppt,
+      generatedPassword: generatedPassword || undefined
     });
   } catch (err) {
     console.error("Public booking failed:", err);
@@ -3930,9 +3949,35 @@ app.delete("/api/notifications/:id", authenticateToken, async (req: Authenticate
   const { id } = req.params;
   try {
     if (prisma) {
+      const notification = await prisma.notification.findUnique({ where: { id } });
+      if (!notification) {
+        return res.status(404).json({ error: "Notification not found" });
+      }
+
+      if (req.user?.role === "PATIENT") {
+        const patient = await prisma.patient.findFirst({
+          where: { OR: [{ id: req.user.id }, { userId: req.user.id }] }
+        });
+        const ownId = patient ? patient.id : req.user.id;
+        if (notification.patientId !== ownId) {
+          return res.status(403).json({ error: "Forbidden: Patients can only delete their own notifications." });
+        }
+      }
+
       await prisma.notification.delete({ where: { id } });
     } else {
       const local = readLocalJsonDb();
+      const notification = (local.notifications || []).find((n: any) => n.id === id);
+      if (!notification) {
+        return res.status(404).json({ error: "Notification not found" });
+      }
+
+      if (req.user?.role === "PATIENT") {
+        if (notification.patientId && notification.patientId !== req.user.id) {
+          return res.status(403).json({ error: "Forbidden: Patients can only delete their own notifications." });
+        }
+      }
+
       local.notifications = (local.notifications || []).filter((n: any) => n.id !== id);
       writeLocalJsonDb("notifications", local.notifications);
     }
@@ -3954,9 +3999,17 @@ app.get("/api/health", (req, res) => {
 
 // Start Server Setup and Vite Integration
 async function startServer() {
-  // Run seeding if using PostgreSQL Prisma
+  // Run seeding if using PostgreSQL Prisma with a safe 15s timeout
   if (prisma) {
-    await seedDatabaseIfEmpty();
+    try {
+      await Promise.race([
+        seedDatabaseIfEmpty(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Database seeding timed out after 15 seconds")), 15000))
+      ]);
+    } catch (seedErr) {
+      console.error("⚠️ Database seeding failed or timed out:", seedErr);
+      console.log("Proceeding with server startup...");
+    }
   } else {
     initLocalJsonDb();
   }
